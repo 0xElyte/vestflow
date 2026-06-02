@@ -28,7 +28,6 @@
 //! |---------------------------------|------------------------------------------------------------------|
 //! | `"Schedule not found"`          | `get_schedule`, `claim`, `revoke` with an unknown ID             |
 //! | `"Nothing to claim yet"`        | `claim` called before any tokens have vested                     |
-//! | `"Schedule has been revoked"`    | `claim` called on a schedule that was already revoked            |
 //! | `"Schedule is not revocable"`   | `revoke` called on an irrevocable schedule                       |
 //! | `"Already revoked"`             | `revoke` called a second time on the same schedule               |
 //! | `"Amount must be positive"`     | `create_schedule` with `total_amount` ≤ 0                        |
@@ -482,8 +481,32 @@ impl VestFlowContract {
             .set(&DataKey::Schedule(id), &schedule);
         env.storage().instance().set(&DataKey::ScheduleCount, &id);
 
-        env.events()
-            .publish((symbol_short!("created"), grantor), id);
+        // Maintain grantor schedule index
+        let mut grantor_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(grantor.clone()))
+            .unwrap_or(vec![&env]);
+        grantor_ids.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::GrantorSchedules(grantor.clone()), &grantor_ids);
+
+        // Maintain beneficiary schedule index
+        let mut beneficiary_ids: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
+            .unwrap_or(vec![&env]);
+        beneficiary_ids.push_back(id);
+        env.storage()
+            .instance()
+            .set(&DataKey::BeneficiarySchedules(beneficiary.clone()), &beneficiary_ids);
+
+        env.events().publish(
+            (symbol_short!("created"), grantor, beneficiary, token),
+            (id, total_amount),
+        );
 
         id
     }
@@ -515,6 +538,7 @@ impl VestFlowContract {
     ) -> u64 {
         grantor.require_auth();
 
+        assert!(beneficiary != grantor, "Beneficiary must differ from grantor");
         assert!(total_amount > 0, "Amount must be positive");
         assert!(!milestones.is_empty(), "Milestones required");
 
@@ -592,6 +616,8 @@ impl VestFlowContract {
 
     /// Claim all currently vested but unclaimed tokens.
     ///
+    /// Vested-but-unclaimed tokens remain claimable even after a revocation.
+    ///
     /// # Errors
     ///
     /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
@@ -659,6 +685,8 @@ impl VestFlowContract {
 
         schedule.revoked = true;
         schedule.vested_at_revoke = vested;
+
+        // Return unvested tokens to grantor
         if unvested > 0 {
             let contract_address = env.current_contract_address();
             token::Client::new(&env, &schedule.token).transfer(
@@ -677,6 +705,39 @@ impl VestFlowContract {
         );
 
         Self::release_lock(&env);
+    }
+
+    /// Transfer beneficiary rights to a new address.
+    ///
+    /// Only the current beneficiary may call this. The schedule must not be
+    /// revoked. Emits a `bnf_chng` event with
+    /// `(schedule_id, old_beneficiary, new_beneficiary)`.
+    ///
+    /// # Errors
+    ///
+    /// Panics with `"Schedule not found"` if `schedule_id` does not exist.
+    /// Panics with `"Schedule has been revoked"` if the schedule was revoked.
+    pub fn transfer_beneficiary(env: Env, schedule_id: u64, new_beneficiary: Address) {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .expect("Schedule not found");
+
+        schedule.beneficiary.require_auth();
+        assert!(!schedule.revoked, "Schedule has been revoked");
+
+        let old_beneficiary = schedule.beneficiary.clone();
+        schedule.beneficiary = new_beneficiary.clone();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+
+        env.events().publish(
+            (symbol_short!("bnf_chng"), schedule_id),
+            (old_beneficiary, new_beneficiary),
+        );
     }
 
     /// Read a vesting schedule by ID.
@@ -1483,5 +1544,98 @@ mod test {
             &false,
             &milestones,
         );
+    }
+
+    // --- Issue #7: transfer_beneficiary tests ---
+
+    #[test]
+    fn test_transfer_beneficiary_success() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        client.transfer_beneficiary(&id, &new_beneficiary);
+
+        let schedule = client.get_schedule(&id);
+        assert_eq!(schedule.beneficiary, new_beneficiary);
+    }
+
+    #[test]
+    #[should_panic(expected = "Schedule has been revoked")]
+    fn test_transfer_beneficiary_revoked_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let new_beneficiary = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        client.revoke(&id);
+        client.transfer_beneficiary(&id, &new_beneficiary);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_transfer_beneficiary_non_beneficiary_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+
+        // Mock only the attacker's auth — beneficiary.require_auth() will fail
+        // because the attacker is not the beneficiary.
+        env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+            address: &attacker,
+            invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                contract: &client.address,
+                fn_name: "transfer_beneficiary",
+                args: soroban_sdk::vec![
+                    &env,
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&id, &env),
+                    soroban_sdk::IntoVal::<soroban_sdk::Env, soroban_sdk::Val>::into_val(&attacker, &env),
+                ]
+                .into(),
+                sub_invokes: &[],
+            },
+        }]);
+        client.transfer_beneficiary(&id, &attacker);
     }
 }
