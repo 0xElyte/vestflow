@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import Link from "next/link";
-import { ScheduleData, stroopsToXlm, truncate, vestingProgress, formatDate, claimVested, revokeSchedule, parseContractError, NATIVE_TOKEN } from "@/lib/stellar";
+import { ScheduleData, stroopsToXlm, truncate, vestingProgress, formatDate, formatCliffDate, claimVested, revokeSchedule, parseContractError, NATIVE_TOKEN } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import VestingChart from "@/components/VestingChart";
 
@@ -82,7 +82,7 @@ export default function ScheduleCard({ schedule, onAction }: { schedule: Schedul
             <p className="text-xs text-zinc-500 mt-1.5">
               Unlocks on{" "}
               <span className="text-zinc-300">
-                {formatDate(schedule.start_time + schedule.cliff_duration)}
+                {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
               </span>
             </p>
           )}
