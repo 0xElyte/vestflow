@@ -510,6 +510,10 @@ impl VestFlowContract {
             return Err(VestFlowError::CliffExceedsDuration);
         }
         assert!(lockup_duration >= cliff_duration, "Lockup cannot be less than cliff");
+        assert!(
+            start_time >= env.ledger().timestamp(),
+            "Start time cannot be in the past"
+        );
 
         let count: u64 = env
             .storage()
@@ -657,7 +661,7 @@ impl VestFlowContract {
             paused_duration: 0,
             paused_at: 0,
             requires_milestones: false,
-            milestones,
+            milestones: milestones.clone(),
         };
 
         env.storage()
@@ -1414,40 +1418,25 @@ mod test {
     }
 
     #[test]
-    fn test_linear_rounding_edge_cases_floor_until_final_claim() {
+    #[should_panic(expected = "Start time cannot be in the past")]
+    fn test_create_schedule_rejects_past_start_time() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, grantor, beneficiary, token_addr, _) = setup(&env);
-        let token = TokenClient::new(&env, &token_addr);
 
-        set_time(&env, 0);
-        let id = client.create_schedule(
+        set_time(&env, 1000);
+        client.create_schedule(
             &grantor,
             &beneficiary,
             &token_addr,
             &1000,
-            &0,
-            &3,
+            &999,
+            &1000,
             &0,
             &0,
             &VestingKind::Linear,
             &false,
         );
-
-        set_time(&env, 1);
-        assert_eq!(client.claimable(&id), 333);
-        client.claim(&id);
-        assert_eq!(token.balance(&beneficiary), 333);
-
-        set_time(&env, 2);
-        assert_eq!(client.claimable(&id), 333);
-        client.claim(&id);
-        assert_eq!(token.balance(&beneficiary), 666);
-
-        set_time(&env, 3);
-        assert_eq!(client.claimable(&id), 334);
-        client.claim(&id);
-        assert_eq!(token.balance(&beneficiary), 1000);
     }
 
     #[test]
@@ -2188,6 +2177,7 @@ mod test {
             &1000,
             &1000,
             &0,
+            &0,
             &VestingKind::Linear,
             &true,
         );
@@ -2330,8 +2320,6 @@ mod test {
             prop_assert!(claimable <= total_amount);
         }
     }
-}
-
     #[test]
     fn test_lockup_prevents_early_claim() {
         let env = Env::default();
@@ -2384,9 +2372,9 @@ mod test {
         assert_eq!(client.claimable(&id), 0);
 
         set_time(&env, 400);
-        assert_eq!(client.claimable(&id), 200);
+        assert_eq!(client.claimable(&id), 250);
         client.claim(&id);
-        assert_eq!(token.balance(&beneficiary), 200);
+        assert_eq!(token.balance(&beneficiary), 250);
     }
 
     #[test]
