@@ -18,5 +18,7 @@ export type {
   ScheduleData,
   VestflowConfig,
   CreateScheduleParams,
+  CreateGradedScheduleParams,
+  GradedMilestone,
   VestingKind,
 } from "./types";
