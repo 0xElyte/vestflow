@@ -1023,12 +1023,7 @@ impl VestFlowContract {
         let contract_address = env.current_contract_address();
         let token_client = token::Client::new(&env, &schedule.token);
 
-        // Use try_transfer to catch balance-related errors and provide a clearer message.
-        // Two expect calls: outer handles the invocation error; inner handles the contract error.
-        token_client
-            .try_transfer(&contract_address, &schedule.beneficiary, &claimable)
-            .expect("Insufficient balance or below minimum reserve")
-            .expect("Insufficient balance or below minimum reserve");
+        token_client.transfer(&contract_address, &schedule.beneficiary, &claimable);
 
         env.storage()
             .instance()
