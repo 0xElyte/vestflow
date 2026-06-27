@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { createSchedule, CONTRACT_ID, parseContractError, NETWORK, NATIVE_TOKEN, stroopsToXlm, xlmToStroops } from "@/lib/stellar";
+import { createSchedule, CONTRACT_ID, parseContractError, NETWORK, NATIVE_TOKEN, stroopsToXlm, xlmToStroops, getWalletXlmBalance } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -204,6 +204,7 @@ export default function CreateForm() {
   const [txHash, setTxHash] = useState("");
   const [errMsg, setErrMsg] = useState("");
   const [previewDate, setPreviewDate] = useState("");
+  const [balanceError, setBalanceError] = useState("");
 
   const set = (k: keyof FormState, v: string | boolean) =>
     setForm((f) => ({ ...f, [k]: v }));
@@ -223,10 +224,30 @@ export default function CreateForm() {
 
   const isValid = Object.keys(errors).length === 0;
 
-  const handleShowConfirm = (e: React.FormEvent) => {
+  const handleShowConfirm = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitAttempted(true);
+    setBalanceError("");
     if (!isValid) return;
+
+    // Balance check (#276): only for native XLM; non-native tokens use a
+    // different token contract and we cannot read their balance here.
+    if (publicKey && form.tokenAddress.trim() === NATIVE_TOKEN) {
+      try {
+        const amtStroops = xlmToStroops(form.amount);
+        const spendable = await getWalletXlmBalance(publicKey);
+        if (amtStroops > spendable) {
+          const spendableXlm = (Number(spendable) / 10_000_000).toFixed(7).replace(/\.?0+$/, "");
+          setBalanceError(
+            `Insufficient balance. Your wallet has ${spendableXlm} XLM available (after minimum reserve).`
+          );
+          return;
+        }
+      } catch {
+        // If balance fetch fails, proceed and let the network surface the error.
+      }
+    }
+
     setStep("confirm");
   };
 
@@ -278,6 +299,7 @@ export default function CreateForm() {
       kind: "Linear",
       revocable: true,
     });
+    setBalanceError("");
   };
 
   const tokenLabel =
@@ -499,7 +521,7 @@ export default function CreateForm() {
       <Field
         label={`Total Amount (${tokenLabel})`}
         htmlFor="amount"
-        error={visibleErrors.amount}
+        error={visibleErrors.amount ?? (balanceError || undefined)}
         hint="The total number of tokens to lock into this schedule."
       >
         <input
@@ -509,11 +531,11 @@ export default function CreateForm() {
           min="0.0000001"
           step="any"
           value={form.amount}
-          onChange={(e) => set("amount", e.target.value)}
+          onChange={(e) => { set("amount", e.target.value); setBalanceError(""); }}
           onBlur={() => touch("amount")}
           required
-          aria-invalid={!!visibleErrors.amount}
-          className={`input ${visibleErrors.amount ? "border-red-500/60 focus:border-red-500" : ""}`}
+          aria-invalid={!!(visibleErrors.amount || balanceError)}
+          className={`input ${(visibleErrors.amount || balanceError) ? "border-red-500/60 focus:border-red-500" : ""}`}
         />
       </Field>
 
@@ -671,6 +693,7 @@ export default function CreateForm() {
       {/* ── Submit ──────────────────────────────────────────────────────────── */}
       <button
         type="submit"
+        disabled={status === "loading"}
         className="btn-primary rounded-xl py-3 font-semibold text-white disabled:opacity-60"
       >
         Review &amp; Create
